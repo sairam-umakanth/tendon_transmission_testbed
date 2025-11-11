@@ -5,6 +5,10 @@
 // Documentation for this example can be found here:
 // https://docs.odriverobotics.com/v/latest/guides/arduino-can-guide.html
 
+/* Button Configuration */
+#define BUTTON_START 2
+#define BUTTON_STOP 3
+bool runMotor = false;
 
 /* Configuration of example sketch -------------------------------------------*/
 
@@ -105,6 +109,9 @@ void setup() {
 
   Serial.println("Starting ODriveCAN demo");
 
+  pinMode(BUTTON_START, INPUT_PULLUP);
+  pinMode(BUTTON_STOP, INPUT_PULLUP);
+
   // Register callbacks for the heartbeat and encoder feedback messages
   odrv0.onFeedback(onFeedback, &odrv0_user_data);
   odrv0.onStatus(onHeartbeat, &odrv0_user_data);
@@ -155,7 +162,7 @@ void setup() {
     }
   }
 
-  Serial.println("ODrive running!");
+  Serial.println("ODrive ready. Press START button to begin motion.");
 }
 
 void loop() {
@@ -165,17 +172,30 @@ void loop() {
                         // This has been found to reduce the number of dropped messages, however it can be removed
                         // for applications requiring loop times over 100Hz.
 
-  float SINE_PERIOD = 2.0f; // Period of the position command sine wave in seconds
+  if (digitalRead(BUTTON_START) == LOW) {
+    runMotor = true;
+    Serial.println("Motor started");
+    delay(250); // button debounce
+  }
+  if (digitalRead(BUTTON_STOP) == LOW) {
+    runMotor = false;
+    Serial.println("Motor stopped");
+    odrv0.setVelocity(0.0f, 0.0f);
+    delay(250); // button debounce
+  }
+  if (runMotor) {
+    float SINE_PERIOD = 2.0f; // Period of the position command sine wave in seconds
 
-  float t = 0.001 * millis();
+    float t = 0.001 * millis();
+    
+    float phase = t * (TWO_PI / SINE_PERIOD);
+
+    odrv0.setPosition(
+      0.25*sin(phase), // position
+      0.25*cos(phase) * (TWO_PI / SINE_PERIOD) // velocity feedforward (optional)
+    );
+  }
   
-  float phase = t * (TWO_PI / SINE_PERIOD);
-
-  odrv0.setPosition(
-    0.25*sin(phase), // position
-    0.25*cos(phase) * (TWO_PI / SINE_PERIOD) // velocity feedforward (optional)
-  );
-
   // print position and velocity for Serial Plotter
   if (odrv0_user_data.received_feedback) {
     Get_Encoder_Estimates_msg_t feedback = odrv0_user_data.last_feedback;
