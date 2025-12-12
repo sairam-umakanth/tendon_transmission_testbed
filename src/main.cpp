@@ -1,49 +1,40 @@
 
 #include <Arduino.h>
 #include "ODriveCAN.h"
+#include <Wire.h>
+#include <Adafruit_NAU7802.h>
 
-// Documentation for this example can be found here:
-// https://docs.odriverobotics.com/v/latest/guides/arduino-can-guide.html
+/* ------------------------ Load Cells ------------------------ */
+// Create two NAU7802 objects
+Adafruit_NAU7802 nau1;
+Adafruit_NAU7802 nau2;
 
-/* Button Configuration */
-#define BUTTON_START 2
-#define BUTTON_STOP 3
-bool runMotor = false;
+void setupNAU(Adafruit_NAU7802 &nau) {
+  nau.setLDO(NAU7802_3V0);
+  nau.setGain(NAU7802_GAIN_128);
+  nau.setRate(NAU7802_RATE_320SPS);
 
-/* Configuration of example sketch -------------------------------------------*/
+  nau.calibrate(NAU7802_CALMOD_INTERNAL);
+  nau.calibrate(NAU7802_CALMOD_OFFSET);
 
+  // Prime ADC
+  for (int i = 0; i < 10; i++) {
+    while (!nau.available());
+    nau.read();
+  }
+}
+
+/* ------------------------- ODrive CAN ------------------------- */
 // CAN bus baudrate. Make sure this matches for every device on the bus
 #define CAN_BAUDRATE 250000
-
 // ODrive node_id for odrv0
 #define ODRV0_NODE_ID 5
 
-// Uncomment below the line that corresponds to your hardware.
-// See also "Board-specific settings" to adapt the details for your hardware setup.
-
-// #define IS_TEENSY_BUILTIN // Teensy boards with built-in CAN interface (e.g. Teensy 4.1). See below to select which interface to use.
-// #define IS_ARDUINO_BUILTIN // Arduino boards with built-in CAN interface (e.g. Arduino Uno R4 Minima)
-// #define IS_MCP2515 // Any board with external MCP2515 based extension module. See below to configure the module.
-// #define IS_STM32_BUILTIN // STM32 boards with built-in CAN interface (e.g. STM32F4 Discovery).
-
-
-/* Board-specific includes ---------------------------------------------------*/
-
-
-// See https://github.com/tonton81/FlexCAN_T4
-// clone https://github.com/tonton81/FlexCAN_T4.git into /src
 #include <FlexCAN_T4.h>
 #include "ODriveFlexCAN.hpp"
-struct ODriveStatus; // hack to prevent teensy compile error
-
-
-
-/* Board-specific settings ---------------------------------------------------*/
-
-
-/* Teensy */
 
 void onCanMessage(const CanMsg& msg); // forward declaration
+struct ODriveStatus; // hack to prevent teensy compile error
 
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> can_intf;
 
@@ -56,9 +47,6 @@ bool setupCan() {
   can_intf.onReceive(onCanMessage);
   return true;
 }
-
-
-/* Example sketch ------------------------------------------------------------*/
 
 // Instantiate ODrive objects
 ODriveCAN odrv0(wrap_can_intf(can_intf), ODRV0_NODE_ID); // Standard CAN message ID
@@ -95,19 +83,47 @@ void onCanMessage(const CanMsg& msg) {
   }
 }
 
+/* ---------------------------- Setup ---------------------------- */
+
+/* Button Configuration */
+#define BUTTON_START 2
+#define BUTTON_STOP 3
+bool runMotor = false;
+
+bool lastStart = HIGH;
+bool lastStop = HIGH;
+unsigned long debounce = 150;
+unsigned long lastStartTime = 0, lastStopTime = 0;
+
 void setup() {
   while(!Serial); // wait for serial port to open
   Serial.begin(115200);
 
-  // Wait for up to 3 seconds for the serial port to be opened on the PC side.
-  // If no PC connects, continue anyway.
-  for (int i = 0; i < 30 && !Serial; ++i) {
-    delay(100);
+  Serial.println("Initializing Load Cells...");
+  // Start both I2C buses
+  Wire.begin();         // Default I2C (pins 18=SDA0, 19=SCL0 on Teensy 4.0)
+  Wire.setClock(400000);
+
+  Wire1.begin();        // Second I2C (pins 17=SDA1, 16=SCL1 on Teensy 4.0)
+  Wire1.setClock(400000);
+
+  // Initialize first load cell on Wire
+  if (!nau1.begin(&Wire)) {
+    Serial.println("NAU7802 #1 not found!");
+    while (1);
   }
-  delay(200);
 
+  // Initialize second load cell on Wire1
+  if (!nau2.begin(&Wire1)) {
+    Serial.println("NAU7802 #2 not found!");
+    while (1);
+  }
 
-  Serial.println("Starting ODriveCAN demo");
+  // Setup for both
+  setupNAU(nau1);
+  setupNAU(nau2);
+
+  Serial.println("Both load cells ready");
 
   pinMode(BUTTON_START, INPUT_PULLUP);
   pinMode(BUTTON_STOP, INPUT_PULLUP);
@@ -164,46 +180,50 @@ void setup() {
 
   Serial.println("ODrive ready. Press START button to begin motion.");
 }
-
 void loop() {
-  pumpEvents(can_intf); // This is required on some platforms to handle incoming feedback CAN messages
-                        // Note that on MCP2515-based platforms, this will delay for a fixed 10ms.
-                        //
-                        // This has been found to reduce the number of dropped messages, however it can be removed
-                        // for applications requiring loop times over 100Hz.
+  pumpEvents(can_intf);
+  unsigned long now = millis();
 
-  if (digitalRead(BUTTON_START) == LOW) {
+  // Read current button states
+  bool startState = digitalRead(BUTTON_START);
+  bool stopState = digitalRead(BUTTON_STOP);
+
+  if (startState == LOW && lastStart == HIGH && (now - lastStartTime) > debounce) {
     runMotor = true;
-    Serial.println("Motor started");
-    delay(250); // button debounce
+    odrv0.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
+    lastStartTime = now;
   }
-  if (digitalRead(BUTTON_STOP) == LOW) {
+  if (stopState == LOW && lastStop == HIGH && (now - lastStopTime) > debounce) {
     runMotor = false;
-    Serial.println("Motor stopped");
-    odrv0.setVelocity(0.0f, 0.0f);
-    delay(250); // button debounce
+    odrv0.setState(ODriveAxisState::AXIS_STATE_IDLE);
+    lastStopTime = now;
   }
-  if (runMotor) {
-    float SINE_PERIOD = 2.0f; // Period of the position command sine wave in seconds
 
-    float t = 0.001 * millis();
-    
-    float phase = t * (TWO_PI / SINE_PERIOD);
+  lastStart = startState;
+  lastStop  = stopState;
+
+   // ------------- MOTOR COMMAND -------------
+  if (runMotor) {
+    float t = now * 0.001f;
+    float T = 2.0f;
+    float phase = t * (TWO_PI / T);
 
     odrv0.setPosition(
-      0.25*sin(phase), // position
-      0.25*cos(phase) * (TWO_PI / SINE_PERIOD) // velocity feedforward (optional)
+      0.25f * sinf(phase),
+      0.25f * cosf(phase) * (TWO_PI / T)
     );
   }
-  
-  // print position and velocity for Serial Plotter
-  if (odrv0_user_data.received_feedback) {
-    Get_Encoder_Estimates_msg_t feedback = odrv0_user_data.last_feedback;
-    odrv0_user_data.received_feedback = false;
-    Serial.print("odrv0-pos:");
-    Serial.print(feedback.Pos_Estimate);
-    Serial.print(",");
-    Serial.print("odrv0-vel:");
-    Serial.println(feedback.Vel_Estimate);
+
+  // ------------- LOAD CELLS STREAMING -------------
+  if (nau1.available()) {
+    int32_t v1 = nau1.read();
+    Serial.print("LC1:");
+    Serial.println(v1);
+  }
+
+  if (nau2.available()) {
+    int32_t v2 = nau2.read();
+    Serial.print("LC2:");
+    Serial.println(v2);
   }
 }
