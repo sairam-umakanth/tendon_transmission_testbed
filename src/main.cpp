@@ -95,6 +95,9 @@ bool lastStop = HIGH;
 unsigned long debounce = 150;
 unsigned long lastStartTime = 0, lastStopTime = 0;
 
+
+
+
 void setup() {
   while(!Serial); // wait for serial port to open
   Serial.begin(115200);
@@ -190,12 +193,18 @@ void loop() {
 
   if (startState == LOW && lastStart == HIGH && (now - lastStartTime) > debounce) {
     runMotor = true;
+    Serial.println("Starting torque control oscillation");
     odrv0.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
+    delay(50);
+    pumpEvents(can_intf);
     lastStartTime = now;
   }
   if (stopState == LOW && lastStop == HIGH && (now - lastStopTime) > debounce) {
     runMotor = false;
-    odrv0.setState(ODriveAxisState::AXIS_STATE_IDLE);
+    Serial.println("Stopping - setting torque to 0");
+    odrv0.setTorque(0.0f);
+    delay(50);
+    pumpEvents(can_intf);
     lastStopTime = now;
   }
 
@@ -208,13 +217,52 @@ void loop() {
     float T = 2.0f;
     float phase = t * (TWO_PI / T);
 
-    odrv0.setPosition(
-      0.25f * sinf(phase),
-      0.25f * cosf(phase) * (TWO_PI / T)
-    );
+    // Using torque command
+    float commandedTorque = 0.5f * sinf(phase);
+
+    // Clamp torque to ±0.5 Nm for safety
+    const float MAX_TORQUE = 0.5f;
+    if (commandedTorque > MAX_TORQUE) {
+      commandedTorque = MAX_TORQUE;
+    } else if (commandedTorque < -MAX_TORQUE) {
+      commandedTorque = -MAX_TORQUE;
+    }
+
+    odrv0.setTorque(commandedTorque);
   }
 
+  // ------------- FEEDBACK STREAMING -------------
+  // Print commanded torque, position, and velocity
+  static unsigned long lastPrintTime = 0;
+  if (now - lastPrintTime >= 50) {  // Print every 50ms (20Hz)
+    lastPrintTime = now;
+    
+    // Calculate current commanded torque
+    float t = now * 0.001f;
+    float T = 2.0f;
+    float phase = t * (TWO_PI / T);
+    float commandedTorque = runMotor ? (0.5f * sinf(phase)) : 0.0f;
+    
+    // Print commanded torque
+    Serial.print("Cmd_Torque:");
+    Serial.print(commandedTorque, 4);
+    Serial.print(",");
+    
+    // Print position and velocity
+    if (odrv0_user_data.received_feedback) {
+      Serial.print("Pos:");
+      Serial.print(odrv0_user_data.last_feedback.Pos_Estimate, 4);
+      Serial.print(",");
+      Serial.print("Vel:");
+      Serial.println(odrv0_user_data.last_feedback.Vel_Estimate, 4);
+    } else {
+      Serial.println();
+    }
+  }
+  
+
   // ------------- LOAD CELLS STREAMING -------------
+  /*
   if (nau1.available()) {
     int32_t v1 = nau1.read();
     Serial.print("LC1:");
@@ -226,4 +274,5 @@ void loop() {
     Serial.print("LC2:");
     Serial.println(v2);
   }
+    */
 }
