@@ -95,8 +95,19 @@ bool lastStop = HIGH;
 unsigned long debounce = 150;
 unsigned long lastStartTime = 0, lastStopTime = 0;
 
+/* Position Limiting */
+const float LINEAR_RANGE_MM = 30.0f; // 30mm total linear travel (one-sided from start)
+const float DRUM_RADIUS_MM = 3.0f; // Drum radius in mm 
+const float DRUM_DIAMETER_MM = DRUM_RADIUS_MM * 2.0f;
+const float DRUM_CIRCUMFERENCE_MM = PI * DRUM_DIAMETER_MM;
 
+// linear motion per revolution = circumference of drum
+const float MM_PER_ROTATION = DRUM_CIRCUMFERENCE_MM;
+// number of rotations needed to achieve linear range (30 mm)
+const float MAX_POSITION_ROTATIONS = LINEAR_RANGE_MM / MM_PER_ROTATION;
 
+float startPosition = 0.0f;  // Starting position at one end of rail
+float centerPosition = 0.0f; // Center of oscillation (15mm from start)
 
 void setup() {
   while(!Serial); // wait for serial port to open
@@ -181,8 +192,23 @@ void setup() {
     }
   }
 
-  Serial.println("ODrive ready. Press START button to begin motion.");
+  Serial.println("ODrive in closed loop control. Configuring torque control mode...");
+  
+  // Set controller mode to torque control
+  odrv0.setControllerMode(ODriveControlMode::CONTROL_MODE_TORQUE_CONTROL, ODriveInputMode::INPUT_MODE_PASSTHROUGH);
+  delay(100);
+  
+  // Pump events to process any responses
+  for (int i = 0; i < 20; i++) {
+    pumpEvents(can_intf);
+    delay(10);
+  }
+
+  Serial.println("ODrive ready. Press START button to begin torque oscillation.");
 }
+
+/* ---------------------------- Motion ---------------------------- */
+
 void loop() {
   pumpEvents(can_intf);
   unsigned long now = millis();
@@ -191,14 +217,63 @@ void loop() {
   bool startState = digitalRead(BUTTON_START);
   bool stopState = digitalRead(BUTTON_STOP);
 
+  // START BUTTON
   if (startState == LOW && lastStart == HIGH && (now - lastStartTime) > debounce) {
-    runMotor = true;
-    Serial.println("Starting torque control oscillation");
+    Serial.println("START button pressed!");
+    
+    // Ensure we're in closed loop control
+    Serial.println("Entering closed loop control...");
     odrv0.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
-    delay(50);
-    pumpEvents(can_intf);
+
+    // Wait for state to change and pump events
+    unsigned long timeout = millis() + 1000;
+    while (odrv0_user_data.last_heartbeat.Axis_State != ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL && millis() < timeout) {
+      pumpEvents(can_intf);
+      delay(10);
+    }
+    // Get current position with manual request
+    Serial.println("Reading starting position...");
+    Get_Encoder_Estimates_msg_t feedback;
+    if (odrv0.request(feedback, 500)) {
+      startPosition = feedback.Pos_Estimate;
+      centerPosition = startPosition + (MAX_POSITION_ROTATIONS / 2.0f);
+      odrv0_user_data.last_feedback = feedback;
+      odrv0_user_data.received_feedback = true;
+      
+      Serial.print("Start position: ");
+      Serial.print(startPosition, 4);
+      Serial.println(" rotations");
+      Serial.print("Center position: ");
+      Serial.print(centerPosition, 4);
+      Serial.println(" rotations");
+      Serial.print("End position: ");
+      Serial.print(startPosition + MAX_POSITION_ROTATIONS, 4);
+      Serial.println(" rotations");
+      Serial.print("Drum circumference: ");
+      Serial.print(DRUM_CIRCUMFERENCE_MM, 2);
+      Serial.println(" mm");
+      Serial.print("Linear motion per rotation: ");
+      Serial.print(MM_PER_ROTATION, 2);
+      Serial.println(" mm");
+      Serial.print("Total rotation range: ");
+      Serial.print(MAX_POSITION_ROTATIONS, 4);
+      Serial.println(" rotations (30mm linear)");
+      Serial.print("Position limits: ");
+      Serial.print(startPosition, 2);
+      Serial.print(" to ");
+      Serial.print(startPosition + MAX_POSITION_ROTATIONS, 2);
+      Serial.println(" rotations");
+      
+      runMotor = true;
+      Serial.println("Starting torque oscillation NOW!");
+    } else {
+      Serial.println("ERROR: Could not read starting position!");
+    }
+    
     lastStartTime = now;
   }
+
+  // STOP BUTTON
   if (stopState == LOW && lastStop == HIGH && (now - lastStopTime) > debounce) {
     runMotor = false;
     Serial.println("Stopping - setting torque to 0");
@@ -212,54 +287,110 @@ void loop() {
   lastStop  = stopState;
 
    // ------------- MOTOR COMMAND -------------
-  if (runMotor) {
+ if (runMotor) {
+    // Manually request feedback every loop iteration
+    Get_Encoder_Estimates_msg_t feedback;
+    bool haveFeedback = odrv0.request(feedback, 100); 
+    
+    float currentPos = 0.0f;
+    float currentVel = 0.0f;
+    
+    if (haveFeedback) {
+      currentPos = feedback.Pos_Estimate;
+      currentVel = feedback.Vel_Estimate;
+      // Update our stored feedback
+      odrv0_user_data.last_feedback = feedback;
+      odrv0_user_data.received_feedback = true;
+    }
+    
+    // Calculate position limits (start to start+30mm)
+    float minPos = startPosition;  // Starting end of rail
+    float maxPos = startPosition + MAX_POSITION_ROTATIONS;  // 30mm travel end
+    
     float t = now * 0.001f;
-    float T = 2.0f;
+    float T = 4.0f;  // 4 second period
     float phase = t * (TWO_PI / T);
 
-    // Using torque command
+    // Sinusoidal torque command
     float commandedTorque = 0.5f * sinf(phase);
-
+    
+    // Only apply position limiting if we have feedback
+    if (haveFeedback) {
+      // Calculate normalized position (0.0 = start, 1.0 = end)
+      float normalizedPos = (currentPos - startPosition) / MAX_POSITION_ROTATIONS;
+      normalizedPos = constrain(normalizedPos, -0.2f, 1.2f); // Allow some overshoot for calculation
+      
+      // Debug print statements
+      static unsigned long lastLimitDebug = 0;
+      if (now - lastLimitDebug > 100) {
+        lastLimitDebug = now;
+        Serial.print("Pos: ");
+        Serial.print((currentPos - startPosition) * MM_PER_ROTATION, 1);
+        Serial.print("mm | Vel: ");
+        Serial.print(currentVel, 2);
+        Serial.print(" rot/s | Norm: ");
+        Serial.print(normalizedPos, 2);
+        Serial.print(" | Torque: ");
+        Serial.print(commandedTorque, 3);
+        Serial.println(" Nm");
+      }
+      
+      // Progressive soft limiting - starts gently, increases near boundaries
+      // This creates smooth deceleration without rattling
+      if (normalizedPos > 0.7f) {
+        // Approaching max limit (21mm+)
+        float excess = normalizedPos - 0.7f; // 0.0 to 0.3+
+        
+        // Progressively reduce positive torque
+        if (commandedTorque > 0) {
+          float reduction = excess / 0.3f; // 0.0 to 1.0
+          reduction = constrain(reduction, 0.0f, 1.5f); // Allow >1.0 for strong limiting
+          commandedTorque *= (1.0f - reduction);
+        }
+        
+        // Add progressive velocity damping
+        commandedTorque -= (0.05f + 0.15f * excess) * currentVel;
+      }
+      else if (normalizedPos < 0.3f) {
+        // Approaching min limit (0-9mm)
+        float excess = 0.3f - normalizedPos; // 0.0 to 0.3+
+        
+        // Progressively reduce negative torque
+        if (commandedTorque < 0) {
+          float reduction = excess / 0.3f;
+          reduction = constrain(reduction, 0.0f, 1.5f);
+          commandedTorque *= (1.0f - reduction);
+        }
+        
+        // Add progressive velocity damping
+        commandedTorque -= (0.05f + 0.15f * excess) * currentVel;
+      }
+      
+      // EMERGENCY STOP only if way past limits
+      float marginRotations = MAX_POSITION_ROTATIONS * 0.15f; // 15% margin =
+      
+      if (currentPos >= (maxPos + marginRotations) && currentVel > 0) {
+        commandedTorque = -0.5f; // Full reverse
+        Serial.println("!!! MAX LIMIT - EMERGENCY BRAKE!");
+        if (currentPos >= (maxPos + marginRotations * 1.5f)) {
+          runMotor = false; // Stop completely if really far
+        }
+      }
+      else if (currentPos <= (minPos - marginRotations) && currentVel < 0) {
+        commandedTorque = 0.5f; // Full forward
+        Serial.println("!!! MIN LIMIT - EMERGENCY BRAKE!");
+        if (currentPos <= (minPos - marginRotations * 1.5f)) {
+          runMotor = false;
+        }
+      }
+    }
+    
     // Clamp torque to ±0.5 Nm for safety
     const float MAX_TORQUE = 0.5f;
-    if (commandedTorque > MAX_TORQUE) {
-      commandedTorque = MAX_TORQUE;
-    } else if (commandedTorque < -MAX_TORQUE) {
-      commandedTorque = -MAX_TORQUE;
-    }
+    commandedTorque = constrain(commandedTorque, -MAX_TORQUE, MAX_TORQUE);
 
     odrv0.setTorque(commandedTorque);
   }
-
-  // ------------- FEEDBACK STREAMING -------------
-  // Print commanded torque, position, and velocity
-  static unsigned long lastPrintTime = 0;
-  if (now - lastPrintTime >= 50) {  // Print every 50ms (20Hz)
-    lastPrintTime = now;
-    
-    // Calculate current commanded torque
-    float t = now * 0.001f;
-    float T = 2.0f;
-    float phase = t * (TWO_PI / T);
-    float commandedTorque = runMotor ? (0.5f * sinf(phase)) : 0.0f;
-    
-    // Print commanded torque
-    Serial.print("Cmd_Torque:");
-    Serial.print(commandedTorque, 4);
-    Serial.print(",");
-    
-    // Print position and velocity
-    if (odrv0_user_data.received_feedback) {
-      Serial.print("Pos:");
-      Serial.print(odrv0_user_data.last_feedback.Pos_Estimate, 4);
-      Serial.print(",");
-      Serial.print("Vel:");
-      Serial.println(odrv0_user_data.last_feedback.Vel_Estimate, 4);
-    } else {
-      Serial.println();
-    }
-  }
-  
 
   // ------------- LOAD CELLS STREAMING -------------
   /*
@@ -274,5 +405,5 @@ void loop() {
     Serial.print("LC2:");
     Serial.println(v2);
   }
-    */
+  */
 }
