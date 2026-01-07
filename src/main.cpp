@@ -1,5 +1,3 @@
-
-#include <Arduino.h>
 #include "ODriveCAN.h"
 #include <Wire.h>
 #include <Adafruit_NAU7802.h>
@@ -49,8 +47,8 @@ bool setupCan() {
 }
 
 // Instantiate ODrive objects
-ODriveCAN odrv0(wrap_can_intf(can_intf), ODRV0_NODE_ID); // Standard CAN message ID
-ODriveCAN* odrives[] = {&odrv0}; // Make sure all ODriveCAN instances are accounted for here
+ODriveCAN odrv0(wrap_can_intf(can_intf), ODRV0_NODE_ID);
+ODriveCAN* odrives[] = {&odrv0};
 
 struct ODriveUserData {
   Heartbeat_msg_t last_heartbeat;
@@ -89,6 +87,7 @@ void onCanMessage(const CanMsg& msg) {
 #define BUTTON_START 2
 #define BUTTON_STOP 3
 bool runMotor = false;
+bool isLogging = false;
 
 bool lastStart = HIGH;
 bool lastStop = HIGH;
@@ -97,28 +96,41 @@ unsigned long lastStartTime = 0, lastStopTime = 0;
 
 /* Position Limiting */
 const float LINEAR_RANGE_MM = 30.0f; // 30mm total linear travel (one-sided from start)
-const float DRUM_RADIUS_MM = 3.0f; // Drum radius in mm 
-const float DRUM_DIAMETER_MM = DRUM_RADIUS_MM * 2.0f;
-const float DRUM_CIRCUMFERENCE_MM = PI * DRUM_DIAMETER_MM;
+const float DRUM_RADIUS_MM = 3.0f; // Drum radius in mm
+const float DRUM_DIAMETER_MM = DRUM_RADIUS_MM * 2.0f;  // 6mm diameter
+const float DRUM_CIRCUMFERENCE_MM = PI * DRUM_DIAMETER_MM;  // ~18.85mm
 
-// linear motion per revolution = circumference of drum
-const float MM_PER_ROTATION = DRUM_CIRCUMFERENCE_MM;
-// number of rotations needed to achieve linear range (30 mm)
-const float MAX_POSITION_ROTATIONS = LINEAR_RANGE_MM / MM_PER_ROTATION;
+const float MM_PER_ROTATION = DRUM_CIRCUMFERENCE_MM;  // 1 rotation = full circumference of linear motion
+const float MAX_POSITION_ROTATIONS = LINEAR_RANGE_MM / MM_PER_ROTATION;  // number of rotations for 30 mm travel
 
 float startPosition = 0.0f;  // Starting position at one end of rail
 float centerPosition = 0.0f; // Center of oscillation (15mm from start)
 
+// Data logging variables
+int32_t lastLC1_raw = 0;
+int32_t lastLC2_raw = 0;
+
+// Load cell calibration constants - from calibration.py from Oliver
+const float LC1_ZERO = 720.98f;      // Zero offset for LC1 (raw counts at 0N)
+const float LC1_NCOUNT = -0.000047f; // Newtons per count for LC1
+const float LC2_ZERO = 929.57f;      // Zero offset for LC2 (raw counts at 0N)
+const float LC2_NCOUNT = 0.000049f;  // Newtons per count for LC2
+
+// Function to convert raw load cell reading to Newtons
+float loadCellToNewtons(int32_t rawValue, float zero, float nCount) {
+  return nCount * (rawValue - zero);
+}
+
 void setup() {
-  while(!Serial); // wait for serial port to open
+  while(!Serial);
   Serial.begin(115200);
 
   Serial.println("Initializing Load Cells...");
   // Start both I2C buses
-  Wire.begin();         // Default I2C (pins 18=SDA0, 19=SCL0 on Teensy 4.0)
+  Wire.begin();
   Wire.setClock(400000);
 
-  Wire1.begin();        // Second I2C (pins 17=SDA1, 16=SCL1 on Teensy 4.0)
+  Wire1.begin();
   Wire1.setClock(400000);
 
   // Initialize first load cell on Wire
@@ -142,15 +154,13 @@ void setup() {
   pinMode(BUTTON_START, INPUT_PULLUP);
   pinMode(BUTTON_STOP, INPUT_PULLUP);
 
-  // Register callbacks for the heartbeat and encoder feedback messages
+  // Register callbacks for heartbeat and encoder feedback
   odrv0.onFeedback(onFeedback, &odrv0_user_data);
   odrv0.onStatus(onHeartbeat, &odrv0_user_data);
 
-  // Configure and initialize the CAN bus interface. This function depends on
-  // your hardware and the CAN stack that you're using.
   if (!setupCan()) {
     Serial.println("CAN failed to initialize: reset required");
-    while (true); // spin indefinitely
+    while (true);
   }
 
   Serial.println("Waiting for ODrive...");
@@ -165,7 +175,7 @@ void setup() {
   Get_Bus_Voltage_Current_msg_t vbus;
   if (!odrv0.request(vbus, 1000)) {
     Serial.println("vbus request failed!");
-    while (true); // spin indefinitely
+    while (true);
   }
 
   Serial.print("DC voltage [V]: ");
@@ -179,13 +189,6 @@ void setup() {
     delay(1);
     odrv0.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
 
-    // Pump events for 150ms. This delay is needed for two reasons;
-    // 1. If there is an error condition, such as missing DC power, the ODrive might
-    //    briefly attempt to enter CLOSED_LOOP_CONTROL state, so we can't rely
-    //    on the first heartbeat response, so we want to receive at least two
-    //    heartbeats (100ms default interval).
-    // 2. If the bus is congested, the setState command won't get through
-    //    immediately but can be delayed.
     for (int i = 0; i < 15; ++i) {
       delay(10);
       pumpEvents(can_intf);
@@ -207,8 +210,6 @@ void setup() {
   Serial.println("ODrive ready. Press START button to begin torque oscillation.");
 }
 
-/* ---------------------------- Motion ---------------------------- */
-
 void loop() {
   pumpEvents(can_intf);
   unsigned long now = millis();
@@ -217,21 +218,26 @@ void loop() {
   bool startState = digitalRead(BUTTON_START);
   bool stopState = digitalRead(BUTTON_STOP);
 
-  // START BUTTON
+  // START button
   if (startState == LOW && lastStart == HIGH && (now - lastStartTime) > debounce) {
     Serial.println("START button pressed!");
     
     // Ensure we're in closed loop control
     Serial.println("Entering closed loop control...");
     odrv0.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
-
+    
     // Wait for state to change and pump events
     unsigned long timeout = millis() + 1000;
     while (odrv0_user_data.last_heartbeat.Axis_State != ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL && millis() < timeout) {
       pumpEvents(can_intf);
       delay(10);
     }
-    // Get current position with manual request
+    
+    if (odrv0_user_data.last_heartbeat.Axis_State == ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL) {
+      Serial.println("Closed loop control active!");
+    } 
+    
+    // Get current position
     Serial.println("Reading starting position...");
     Get_Encoder_Estimates_msg_t feedback;
     if (odrv0.request(feedback, 500)) {
@@ -243,27 +249,12 @@ void loop() {
       Serial.print("Start position: ");
       Serial.print(startPosition, 4);
       Serial.println(" rotations");
-      Serial.print("Center position: ");
-      Serial.print(centerPosition, 4);
-      Serial.println(" rotations");
-      Serial.print("End position: ");
-      Serial.print(startPosition + MAX_POSITION_ROTATIONS, 4);
-      Serial.println(" rotations");
-      Serial.print("Drum circumference: ");
-      Serial.print(DRUM_CIRCUMFERENCE_MM, 2);
-      Serial.println(" mm");
-      Serial.print("Linear motion per rotation: ");
-      Serial.print(MM_PER_ROTATION, 2);
-      Serial.println(" mm");
-      Serial.print("Total rotation range: ");
-      Serial.print(MAX_POSITION_ROTATIONS, 4);
-      Serial.println(" rotations (30mm linear)");
-      Serial.print("Position limits: ");
-      Serial.print(startPosition, 2);
-      Serial.print(" to ");
-      Serial.print(startPosition + MAX_POSITION_ROTATIONS, 2);
-      Serial.println(" rotations");
       
+      // Print CSV header
+      Serial.println("===== DATA START =====");
+      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Torque_Nm,LoadCell1_N,LoadCell2_N");
+      
+      isLogging = true;
       runMotor = true;
       Serial.println("Starting torque oscillation NOW!");
     } else {
@@ -272,10 +263,12 @@ void loop() {
     
     lastStartTime = now;
   }
-
-  // STOP BUTTON
+  
+  // STOP button
   if (stopState == LOW && lastStop == HIGH && (now - lastStopTime) > debounce) {
     runMotor = false;
+    isLogging = false;
+    Serial.println("===== DATA END =====");
     Serial.println("Stopping - setting torque to 0");
     odrv0.setTorque(0.0f);
     delay(50);
@@ -283,14 +276,15 @@ void loop() {
     lastStopTime = now;
   }
 
+  // Save button states for next iteration
   lastStart = startState;
-  lastStop  = stopState;
+  lastStop = stopState;
 
-   // ------------- MOTOR COMMAND -------------
- if (runMotor) {
+  // ------------- MOTOR COMMAND & DATA LOGGING -------------
+  if (runMotor) {
     // Manually request feedback every loop iteration
     Get_Encoder_Estimates_msg_t feedback;
-    bool haveFeedback = odrv0.request(feedback, 100); 
+    bool haveFeedback = odrv0.request(feedback, 100); // 100ms timeout
     
     float currentPos = 0.0f;
     float currentVel = 0.0f;
@@ -304,40 +298,23 @@ void loop() {
     }
     
     // Calculate position limits (start to start+30mm)
-    float minPos = startPosition;  // Starting end of rail
-    float maxPos = startPosition + MAX_POSITION_ROTATIONS;  // 30mm travel end
+    float minPos = startPosition;
+    float maxPos = startPosition + MAX_POSITION_ROTATIONS;
     
     float t = now * 0.001f;
     float T = 4.0f;  // 4 second period
     float phase = t * (TWO_PI / T);
 
-    // Sinusoidal torque command
     float commandedTorque = 0.5f * sinf(phase);
     
-    // Only apply position limiting if we have feedback
+    // Position limiting
     if (haveFeedback) {
       // Calculate normalized position (0.0 = start, 1.0 = end)
       float normalizedPos = (currentPos - startPosition) / MAX_POSITION_ROTATIONS;
       normalizedPos = constrain(normalizedPos, -0.2f, 1.2f); // Allow some overshoot for calculation
       
-      // Debug print statements
-      static unsigned long lastLimitDebug = 0;
-      if (now - lastLimitDebug > 100) {
-        lastLimitDebug = now;
-        Serial.print("Pos: ");
-        Serial.print((currentPos - startPosition) * MM_PER_ROTATION, 1);
-        Serial.print("mm | Vel: ");
-        Serial.print(currentVel, 2);
-        Serial.print(" rot/s | Norm: ");
-        Serial.print(normalizedPos, 2);
-        Serial.print(" | Torque: ");
-        Serial.print(commandedTorque, 3);
-        Serial.println(" Nm");
-      }
-      
       // Progressive soft limiting - starts gently, increases near boundaries
-      // This creates smooth deceleration without rattling
-      if (normalizedPos > 0.7f) {
+      if (normalizedPos > 0.9f) {
         // Approaching max limit (21mm+)
         float excess = normalizedPos - 0.7f; // 0.0 to 0.3+
         
@@ -351,7 +328,7 @@ void loop() {
         // Add progressive velocity damping
         commandedTorque -= (0.05f + 0.15f * excess) * currentVel;
       }
-      else if (normalizedPos < 0.3f) {
+      else if (normalizedPos < 0.1f) {
         // Approaching min limit (0-9mm)
         float excess = 0.3f - normalizedPos; // 0.0 to 0.3+
         
@@ -367,20 +344,20 @@ void loop() {
       }
       
       // EMERGENCY STOP only if way past limits
-      float marginRotations = MAX_POSITION_ROTATIONS * 0.15f; // 15% margin =
+      float marginRotations = MAX_POSITION_ROTATIONS * 0.15f; // 15% margin = ~4.5mm
       
       if (currentPos >= (maxPos + marginRotations) && currentVel > 0) {
         commandedTorque = -0.5f; // Full reverse
-        Serial.println("!!! MAX LIMIT - EMERGENCY BRAKE!");
         if (currentPos >= (maxPos + marginRotations * 1.5f)) {
           runMotor = false; // Stop completely if really far
+          isLogging = false;
         }
       }
       else if (currentPos <= (minPos - marginRotations) && currentVel < 0) {
         commandedTorque = 0.5f; // Full forward
-        Serial.println("!!! MIN LIMIT - EMERGENCY BRAKE!");
         if (currentPos <= (minPos - marginRotations * 1.5f)) {
           runMotor = false;
+          isLogging = false;
         }
       }
     }
@@ -390,20 +367,41 @@ void loop() {
     commandedTorque = constrain(commandedTorque, -MAX_TORQUE, MAX_TORQUE);
 
     odrv0.setTorque(commandedTorque);
+    
+    // ------------- DATA LOGGING -------------
+    if (isLogging && haveFeedback) {
+      static unsigned long lastDataLog = 0;
+      if (now - lastDataLog > 10) {  // Log every 10ms
+        lastDataLog = now;
+        
+        float posFromStart = (currentPos - startPosition) * MM_PER_ROTATION;
+        
+        // Convert raw load cell values to Newtons
+        float lc1_newtons = loadCellToNewtons(lastLC1_raw, LC1_ZERO, LC1_NCOUNT);
+        float lc2_newtons = loadCellToNewtons(lastLC2_raw, LC2_ZERO, LC2_NCOUNT);
+        
+        // Log data in CSV format: Timestamp, Position, Velocity, Torque, LC1 (N), LC2 (N)
+        Serial.print(now);
+        Serial.print(",");
+        Serial.print(posFromStart, 4);
+        Serial.print(",");
+        Serial.print(currentVel, 4);
+        Serial.print(",");
+        Serial.print(commandedTorque, 4);
+        Serial.print(",");
+        Serial.print(lc1_newtons, 6);
+        Serial.print(",");
+        Serial.println(lc2_newtons, 6);
+      }
+    }
   }
 
-  // ------------- LOAD CELLS STREAMING -------------
-  /*
+  // ------------- LOAD CELLS -------------
   if (nau1.available()) {
-    int32_t v1 = nau1.read();
-    Serial.print("LC1:");
-    Serial.println(v1);
+    lastLC1_raw = nau1.read();
   }
 
   if (nau2.available()) {
-    int32_t v2 = nau2.read();
-    Serial.print("LC2:");
-    Serial.println(v2);
+    lastLC2_raw = nau2.read();
   }
-  */
 }
