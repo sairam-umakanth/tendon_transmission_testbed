@@ -95,22 +95,26 @@ unsigned long debounce = 150;
 unsigned long lastStartTime = 0, lastStopTime = 0;
 
 /* Position Limiting */
-const float LINEAR_RANGE_MM = 30.0f; // 30mm total linear travel (one-sided from start)
-const float DRUM_RADIUS_MM = 3.0f; // Drum radius in mm
+const float LINEAR_RANGE_MM = 30.0f;           // 30mm total linear travel (one-sided from start)
+const float DRUM_RADIUS_MM = 3.0f;             // Drum radius in mm
 const float DRUM_DIAMETER_MM = DRUM_RADIUS_MM * 2.0f;  // 6mm diameter
 const float DRUM_CIRCUMFERENCE_MM = PI * DRUM_DIAMETER_MM;  // ~18.85mm
 
+// Calculate how much linear motion per motor rotation
 const float MM_PER_ROTATION = DRUM_CIRCUMFERENCE_MM;  // 1 rotation = full circumference of linear motion
-const float MAX_POSITION_ROTATIONS = LINEAR_RANGE_MM / MM_PER_ROTATION;  // number of rotations for 30 mm travel
+
+// Calculate rotations needed for 30mm displacement from starting position
+const float MAX_POSITION_ROTATIONS = LINEAR_RANGE_MM / MM_PER_ROTATION;  // ~1.592 rotations for full 30mm travel
 
 float startPosition = 0.0f;  // Starting position at one end of rail
 float centerPosition = 0.0f; // Center of oscillation (15mm from start)
+unsigned long startTime = 0;  // Time when motor started (for phase calculation)
 
 // Data logging variables
 int32_t lastLC1_raw = 0;
 int32_t lastLC2_raw = 0;
 
-// Load cell calibration constants - from calibration.py from Oliver
+// Load cell calibration constants - FROM YOUR CALIBRATION
 const float LC1_ZERO = 720.98f;      // Zero offset for LC1 (raw counts at 0N)
 const float LC1_NCOUNT = -0.000047f; // Newtons per count for LC1
 const float LC2_ZERO = 929.57f;      // Zero offset for LC2 (raw counts at 0N)
@@ -218,7 +222,7 @@ void loop() {
   bool startState = digitalRead(BUTTON_START);
   bool stopState = digitalRead(BUTTON_STOP);
 
-  // START button
+  // START button - trigger on press (HIGH to LOW transition)
   if (startState == LOW && lastStart == HIGH && (now - lastStartTime) > debounce) {
     Serial.println("START button pressed!");
     
@@ -235,27 +239,41 @@ void loop() {
     
     if (odrv0_user_data.last_heartbeat.Axis_State == ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL) {
       Serial.println("Closed loop control active!");
-    } 
+    } else {
+      Serial.println("ERROR: Failed to enter closed loop control!");
+      lastStartTime = now;
+      lastStart = startState;
+      return;
+    }
     
-    // Get current position
+    // Get current position with manual request
     Serial.println("Reading starting position...");
     Get_Encoder_Estimates_msg_t feedback;
     if (odrv0.request(feedback, 500)) {
-      startPosition = feedback.Pos_Estimate;
+      // Set reference so CURRENT position is the END (30mm position)
+      // Motor will move backward from here toward 0mm
+      startPosition = feedback.Pos_Estimate - MAX_POSITION_ROTATIONS;
       centerPosition = startPosition + (MAX_POSITION_ROTATIONS / 2.0f);
       odrv0_user_data.last_feedback = feedback;
       odrv0_user_data.received_feedback = true;
       
-      Serial.print("Start position: ");
-      Serial.print(startPosition, 4);
-      Serial.println(" rotations");
-      
       // Print CSV header
       Serial.println("===== DATA START =====");
-      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Torque_Nm,LoadCell1_N,LoadCell2_N");
+      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Torque_Nm,LoadCell1_N,LoadCell2_N,Direction");
       
       isLogging = true;
       runMotor = true;
+      startTime = now;  // Record when motor started
+      
+      // Debug: Check initial torque value
+      float test_phase = 0.0f * (TWO_PI / 4.0f) + PI;
+      float test_torque = 0.5f * sinf(test_phase);
+      Serial.print("Initial phase with PI offset: ");
+      Serial.print(test_phase, 4);
+      Serial.print(" rad, Initial torque: ");
+      Serial.print(test_torque, 4);
+      Serial.println(" Nm");
+      
       Serial.println("Starting torque oscillation NOW!");
     } else {
       Serial.println("ERROR: Could not read starting position!");
@@ -264,7 +282,7 @@ void loop() {
     lastStartTime = now;
   }
   
-  // STOP button
+  // STOP button - trigger on press (HIGH to LOW transition)
   if (stopState == LOW && lastStop == HIGH && (now - lastStopTime) > debounce) {
     runMotor = false;
     isLogging = false;
@@ -298,48 +316,44 @@ void loop() {
     }
     
     // Calculate position limits (start to start+30mm)
-    float minPos = startPosition;
-    float maxPos = startPosition + MAX_POSITION_ROTATIONS;
+    float minPos = startPosition;  // Starting end of rail
+    float maxPos = startPosition + MAX_POSITION_ROTATIONS;  // 30mm travel end
     
-    float t = now * 0.001f;
+    float t = (now - startTime) * 0.001f;  // Time since START button pressed
     float T = 4.0f;  // 4 second period
     float phase = t * (TWO_PI / T);
 
-    float commandedTorque = 0.5f * sinf(phase);
+    float commandedTorque = 0.5f * cosf(phase);
     
-    // Position limiting
+    // Position Limiting
     if (haveFeedback) {
       // Calculate normalized position (0.0 = start, 1.0 = end)
       float normalizedPos = (currentPos - startPosition) / MAX_POSITION_ROTATIONS;
       normalizedPos = constrain(normalizedPos, -0.2f, 1.2f); // Allow some overshoot for calculation
       
-      // Progressive soft limiting - starts gently, increases near boundaries
+      // Progressive soft limiting 
       if (normalizedPos > 0.9f) {
-        // Approaching max limit (21mm+)
-        float excess = normalizedPos - 0.7f; // 0.0 to 0.3+
+        // Approaching max limit
+        float excess = normalizedPos - 0.7f;
         
-        // Progressively reduce positive torque
         if (commandedTorque > 0) {
-          float reduction = excess / 0.3f; // 0.0 to 1.0
-          reduction = constrain(reduction, 0.0f, 1.5f); // Allow >1.0 for strong limiting
+          float reduction = excess / 0.3f;
+          reduction = constrain(reduction, 0.0f, 1.5f);
           commandedTorque *= (1.0f - reduction);
         }
         
-        // Add progressive velocity damping
         commandedTorque -= (0.05f + 0.15f * excess) * currentVel;
       }
       else if (normalizedPos < 0.1f) {
-        // Approaching min limit (0-9mm)
-        float excess = 0.3f - normalizedPos; // 0.0 to 0.3+
+        // Approaching min limit
+        float excess = 0.3f - normalizedPos;
         
-        // Progressively reduce negative torque
         if (commandedTorque < 0) {
           float reduction = excess / 0.3f;
           reduction = constrain(reduction, 0.0f, 1.5f);
           commandedTorque *= (1.0f - reduction);
         }
         
-        // Add progressive velocity damping
         commandedTorque -= (0.05f + 0.15f * excess) * currentVel;
       }
       
@@ -371,7 +385,7 @@ void loop() {
     // ------------- DATA LOGGING -------------
     if (isLogging && haveFeedback) {
       static unsigned long lastDataLog = 0;
-      if (now - lastDataLog > 10) {  // Log every 10ms
+      if (now - lastDataLog > 10) {  // Log every 100ms (same as debug print rate)
         lastDataLog = now;
         
         float posFromStart = (currentPos - startPosition) * MM_PER_ROTATION;
@@ -380,7 +394,25 @@ void loop() {
         float lc1_newtons = loadCellToNewtons(lastLC1_raw, LC1_ZERO, LC1_NCOUNT);
         float lc2_newtons = loadCellToNewtons(lastLC2_raw, LC2_ZERO, LC2_NCOUNT);
         
-        // Log data in CSV format: Timestamp, Position, Velocity, Torque, LC1 (N), LC2 (N)
+        // Determine direction
+        static float lastPos = 0;
+        static bool firstLog = true;
+        String direction = "";
+        if (!firstLog) {
+          if (posFromStart > lastPos + 0.1) {
+            direction = "MOVING_FORWARD";
+          } else if (posFromStart < lastPos - 0.1) {
+            direction = "MOVING_BACKWARD";
+          } else {
+            direction = "STATIONARY";
+          }
+        } else {
+          direction = "STARTING";
+          firstLog = false;
+        }
+        lastPos = posFromStart;
+        
+        // Log data in CSV format: Timestamp, Position, Velocity, Torque, LC1 (N), LC2 (N), Direction
         Serial.print(now);
         Serial.print(",");
         Serial.print(posFromStart, 4);
@@ -391,7 +423,9 @@ void loop() {
         Serial.print(",");
         Serial.print(lc1_newtons, 6);
         Serial.print(",");
-        Serial.println(lc2_newtons, 6);
+        Serial.print(lc2_newtons, 6);
+        Serial.print(",");
+        Serial.println(direction);
       }
     }
   }
