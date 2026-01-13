@@ -114,11 +114,11 @@ unsigned long startTime = 0;  // Time when motor started (for phase calculation)
 int32_t lastLC1_raw = 0;
 int32_t lastLC2_raw = 0;
 
-// Load cell calibration constants - FROM YOUR CALIBRATION
-const float LC1_ZERO = 720.98f;      // Zero offset for LC1 (raw counts at 0N)
-const float LC1_NCOUNT = -0.000047f; // Newtons per count for LC1
-const float LC2_ZERO = 929.57f;      // Zero offset for LC2 (raw counts at 0N)
-const float LC2_NCOUNT = 0.000049f;  // Newtons per count for LC2
+// Load cell calibration constants 
+const float LC1_ZERO = 720.98f;
+const float LC1_NCOUNT = -0.000047f; 
+const float LC2_ZERO = 929.57f;
+const float LC2_NCOUNT = 0.000049f; 
 
 // Function to convert raw load cell reading to Newtons
 float loadCellToNewtons(int32_t rawValue, float zero, float nCount) {
@@ -320,7 +320,7 @@ void loop() {
     float maxPos = startPosition + MAX_POSITION_ROTATIONS;  // 30mm travel end
     
     float t = (now - startTime) * 0.001f;  // Time since START button pressed
-    float T = 4.0f;  // 4 second period
+    float T = 2.0f;  // 4 second period
     float phase = t * (TWO_PI / T);
 
     float commandedTorque = 0.5f * cosf(phase);
