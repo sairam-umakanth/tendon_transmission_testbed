@@ -323,58 +323,7 @@ void loop() {
     float T = 2.0f;  // 4 second period
     float phase = t * (TWO_PI / T);
 
-    float commandedTorque = 0.5f * cosf(phase);
-    
-    // Position Limiting
-    if (haveFeedback) {
-      // Calculate normalized position (0.0 = start, 1.0 = end)
-      float normalizedPos = (currentPos - startPosition) / MAX_POSITION_ROTATIONS;
-      normalizedPos = constrain(normalizedPos, -0.2f, 1.2f); // Allow some overshoot for calculation
-      
-      // Progressive soft limiting 
-      if (normalizedPos > 0.9f) {
-        // Approaching max limit
-        float excess = normalizedPos - 0.7f;
-        
-        if (commandedTorque > 0) {
-          float reduction = excess / 0.3f;
-          reduction = constrain(reduction, 0.0f, 1.5f);
-          commandedTorque *= (1.0f - reduction);
-        }
-        
-        commandedTorque -= (0.05f + 0.15f * excess) * currentVel;
-      }
-      else if (normalizedPos < 0.1f) {
-        // Approaching min limit
-        float excess = 0.3f - normalizedPos;
-        
-        if (commandedTorque < 0) {
-          float reduction = excess / 0.3f;
-          reduction = constrain(reduction, 0.0f, 1.5f);
-          commandedTorque *= (1.0f - reduction);
-        }
-        
-        commandedTorque -= (0.05f + 0.15f * excess) * currentVel;
-      }
-      
-      // EMERGENCY STOP only if way past limits
-      float marginRotations = MAX_POSITION_ROTATIONS * 0.15f; // 15% margin = ~4.5mm
-      
-      if (currentPos >= (maxPos + marginRotations) && currentVel > 0) {
-        commandedTorque = -0.5f; // Full reverse
-        if (currentPos >= (maxPos + marginRotations * 1.5f)) {
-          runMotor = false; // Stop completely if really far
-          isLogging = false;
-        }
-      }
-      else if (currentPos <= (minPos - marginRotations) && currentVel < 0) {
-        commandedTorque = 0.5f; // Full forward
-        if (currentPos <= (minPos - marginRotations * 1.5f)) {
-          runMotor = false;
-          isLogging = false;
-        }
-      }
-    }
+    float commandedTorque = -0.25 - 0.25f * cosf(phase);
     
     // Clamp torque to ±0.5 Nm for safety
     const float MAX_TORQUE = 0.5f;
