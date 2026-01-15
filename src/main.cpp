@@ -115,8 +115,8 @@ int32_t lastLC1_raw = 0;
 int32_t lastLC2_raw = 0;
 
 // Load cell calibration constants 
-const float LC1_ZERO = 720.98f;
-const float LC1_NCOUNT = -0.000047f; 
+const float LC1_ZERO = -746.44f;
+const float LC1_NCOUNT = 0.000048f; 
 const float LC2_ZERO = 929.57f;
 const float LC2_NCOUNT = 0.000049f; 
 
@@ -199,10 +199,10 @@ void setup() {
     }
   }
 
-  Serial.println("ODrive in closed loop control. Configuring torque control mode...");
+  Serial.println("ODrive in closed loop control. Configuring position control mode...");
   
-  // Set controller mode to torque control
-  odrv0.setControllerMode(ODriveControlMode::CONTROL_MODE_TORQUE_CONTROL, ODriveInputMode::INPUT_MODE_PASSTHROUGH);
+  // Set controller mode to position control
+  odrv0.setControllerMode(ODriveControlMode::CONTROL_MODE_POSITION_CONTROL, ODriveInputMode::INPUT_MODE_PASSTHROUGH);
   delay(100);
   
   // Pump events to process any responses
@@ -211,7 +211,7 @@ void setup() {
     delay(10);
   }
 
-  Serial.println("ODrive ready. Press START button to begin torque oscillation.");
+  Serial.println("ODrive ready. Press START button to begin position oscillation.");
 }
 
 void loop() {
@@ -250,31 +250,27 @@ void loop() {
     Serial.println("Reading starting position...");
     Get_Encoder_Estimates_msg_t feedback;
     if (odrv0.request(feedback, 500)) {
-      // Set reference so CURRENT position is the END (30mm position)
-      // Motor will move backward from here toward 0mm
-      startPosition = feedback.Pos_Estimate - MAX_POSITION_ROTATIONS;
+      // Set reference so CURRENT position is the starting point
+      startPosition = feedback.Pos_Estimate;
       centerPosition = startPosition + (MAX_POSITION_ROTATIONS / 2.0f);
       odrv0_user_data.last_feedback = feedback;
       odrv0_user_data.received_feedback = true;
       
       // Print CSV header
       Serial.println("===== DATA START =====");
-      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Torque_Nm,LoadCell1_N,LoadCell2_N,Direction");
+      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,Direction");
       
       isLogging = true;
       runMotor = true;
       startTime = now;  // Record when motor started
       
-      // Debug: Check initial torque value
-      float test_phase = 0.0f * (TWO_PI / 4.0f) + PI;
-      float test_torque = 0.5f * sinf(test_phase);
-      Serial.print("Initial phase with PI offset: ");
-      Serial.print(test_phase, 4);
-      Serial.print(" rad, Initial torque: ");
-      Serial.print(test_torque, 4);
-      Serial.println(" Nm");
+      Serial.print("Start position: ");
+      Serial.print(startPosition, 4);
+      Serial.print(" rot, Center position: ");
+      Serial.print(centerPosition, 4);
+      Serial.println(" rot");
       
-      Serial.println("Starting torque oscillation NOW!");
+      Serial.println("Starting position oscillation NOW!");
     } else {
       Serial.println("ERROR: Could not read starting position!");
     }
@@ -287,8 +283,13 @@ void loop() {
     runMotor = false;
     isLogging = false;
     Serial.println("===== DATA END =====");
-    Serial.println("Stopping - setting torque to 0");
-    odrv0.setTorque(0.0f);
+    Serial.println("Stopping - holding current position");
+    
+    // Hold at current position
+    if (odrv0_user_data.received_feedback) {
+      odrv0.setPosition(odrv0_user_data.last_feedback.Pos_Estimate);
+    }
+    
     delay(50);
     pumpEvents(can_intf);
     lastStopTime = now;
@@ -315,26 +316,23 @@ void loop() {
       odrv0_user_data.received_feedback = true;
     }
     
-    // Calculate position limits (start to start+30mm)
-    float minPos = startPosition;  // Starting end of rail
-    float maxPos = startPosition + MAX_POSITION_ROTATIONS;  // 30mm travel end
-    
-    float t = (now - startTime) * 0.001f;  // Time since START button pressed
-    float T = 2.0f;  // 4 second period
+    // Calculate time and phase
+    float t = (now - startTime) * 0.001f;  // Time since START button pressed in seconds
+    float T = 2.0f;  // 2 second period
     float phase = t * (TWO_PI / T);
-
-    float commandedTorque = -0.25 - 0.25f * cosf(phase);
     
-    // Clamp torque to ±0.5 Nm for safety
-    const float MAX_TORQUE = 0.5f;
-    commandedTorque = constrain(commandedTorque, -MAX_TORQUE, MAX_TORQUE);
-
-    odrv0.setTorque(commandedTorque);
+    // Calculate target position using cosine wave
+    // Oscillates between startPosition and startPosition + MAX_POSITION_ROTATIONS
+    float amplitude = MAX_POSITION_ROTATIONS / 2.0f;  // Half the total range
+    float commandedPosition = -centerPosition + amplitude * (-cosf(phase));
+    
+    // Send position command
+    odrv0.setPosition(commandedPosition);
     
     // ------------- DATA LOGGING -------------
     if (isLogging && haveFeedback) {
       static unsigned long lastDataLog = 0;
-      if (now - lastDataLog > 10) {  // Log every 100ms (same as debug print rate)
+      if (now - lastDataLog > 10) {  // Log every 10ms
         lastDataLog = now;
         
         float posFromStart = (currentPos - startPosition) * MM_PER_ROTATION;
@@ -361,14 +359,14 @@ void loop() {
         }
         lastPos = posFromStart;
         
-        // Log data in CSV format: Timestamp, Position, Velocity, Torque, LC1 (N), LC2 (N), Direction
+        // Log data in CSV format: Timestamp, Position, Velocity, Commanded Position, LC1 (N), LC2 (N), Direction
         Serial.print(now);
         Serial.print(",");
         Serial.print(posFromStart, 4);
         Serial.print(",");
         Serial.print(currentVel, 4);
         Serial.print(",");
-        Serial.print(commandedTorque, 4);
+        Serial.print((commandedPosition - startPosition) * MM_PER_ROTATION, 4);  // Commanded position in mm
         Serial.print(",");
         Serial.print(lc1_newtons, 6);
         Serial.print(",");
