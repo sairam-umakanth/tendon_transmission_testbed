@@ -318,13 +318,13 @@ void loop() {
     
     // Calculate time and phase
     float t = (now - startTime) * 0.001f;  // Time since START button pressed in seconds
-    float T = 2.0f;  // 2 second period
+    float T = 3.0f;  // 3 second period
     float phase = t * (TWO_PI / T);
     
     // Calculate target position using cosine wave
     // Oscillates between startPosition and startPosition + MAX_POSITION_ROTATIONS
-    float amplitude = MAX_POSITION_ROTATIONS / 2.0f;  // Half the total range
-    float commandedPosition = -centerPosition + amplitude * (-cosf(phase));
+    float amplitude = MAX_POSITION_ROTATIONS / 2.5f;  // Half the total range
+    float commandedPosition = -centerPosition + amplitude * (cosf(phase));
     
     // Send position command
     odrv0.setPosition(commandedPosition);
