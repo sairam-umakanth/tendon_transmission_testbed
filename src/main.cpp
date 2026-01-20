@@ -321,11 +321,32 @@ void loop() {
     float T = 3.0f;  // 3 second period
     float phase = t * (TWO_PI / T);
     
-    // Calculate target position using cosine wave
-    // Oscillates between startPosition and startPosition + MAX_POSITION_ROTATIONS
-    float amplitude = MAX_POSITION_ROTATIONS / 2.5f;  // Half the total range
-    float commandedPosition = -centerPosition + amplitude * (cosf(phase));
+    float rampTime = T / 6.0f;  // Ramp from 0 to -5mm over 0.5 seconds (1/6 of period)
+
+    float commandedPosition;
+
+    if (t < rampTime) {
+      // Ramp phase: smoothly go from 0mm to -5mm (tensioning)
+      float rampProgress = t / rampTime;  // 0 to 1
+      float rampPositionMM = -5.0f * rampProgress;  // 0 to -5mm
+      commandedPosition = startPosition + (rampPositionMM / MM_PER_ROTATION);
+    } else {
+      // Oscillation phase: oscillate between -5mm and -30mm
+      float tOscillation = t - rampTime;  // Time since oscillation started
+      float phase = tOscillation * (TWO_PI / T);
+      
+      const float MIN_POSITION_MM = -20.0f;
+      const float MAX_POSITION_MM = -5.0f;
+      const float OSCILLATION_CENTER_MM = (MAX_POSITION_MM + MIN_POSITION_MM) / 2.0f;  
+      const float OSCILLATION_RANGE_MM = MAX_POSITION_MM - MIN_POSITION_MM;  
+      
+      float amplitudeRot = (OSCILLATION_RANGE_MM / 2.0f) / MM_PER_ROTATION;
+      float centerOffsetRot = OSCILLATION_CENTER_MM / MM_PER_ROTATION;
+      
+      commandedPosition = startPosition + centerOffsetRot + amplitudeRot * cosf(phase);
+    }
     
+
     // Send position command
     odrv0.setPosition(commandedPosition);
     
