@@ -115,10 +115,10 @@ int32_t lastLC1_raw = 0;
 int32_t lastLC2_raw = 0;
 
 // Load cell calibration constants 
-const float LC1_ZERO = -746.44f;
-const float LC1_NCOUNT = 0.000048f; 
-const float LC2_ZERO = 929.57f;
-const float LC2_NCOUNT = 0.000049f; 
+const float LC1_ZERO = -24.61f;
+const float LC1_NCOUNT = 0.000094f; 
+const float LC2_ZERO = -1705.74;
+const float LC2_NCOUNT = 0.000096f; 
 
 // Function to convert raw load cell reading to Newtons
 float loadCellToNewtons(int32_t rawValue, float zero, float nCount) {
@@ -258,7 +258,7 @@ void loop() {
       
       // Print CSV header
       Serial.println("===== DATA START =====");
-      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,Direction");
+      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,CommandedTorque_Nm,MeasuredTorque_Nm,Direction");
       
       isLogging = true;
       runMotor = true;
@@ -335,7 +335,7 @@ void loop() {
       float tOscillation = t - rampTime;  // Time since oscillation started
       float phase = tOscillation * (TWO_PI / T);
       
-      const float MIN_POSITION_MM = -20.0f;
+      const float MIN_POSITION_MM = -30.0f;
       const float MAX_POSITION_MM = -5.0f;
       const float OSCILLATION_CENTER_MM = (MAX_POSITION_MM + MIN_POSITION_MM) / 2.0f;  
       const float OSCILLATION_RANGE_MM = MAX_POSITION_MM - MIN_POSITION_MM;  
@@ -357,6 +357,15 @@ void loop() {
         lastDataLog = now;
         
         float posFromStart = (currentPos - startPosition) * MM_PER_ROTATION;
+
+        // Request torque data
+        Get_Torques_msg_t torques;
+        float commandedTorque = 0.0f;
+        float measuredTorque = 0.0f;
+        if (odrv0.request(torques, 100)) {
+          commandedTorque = torques.Torque_Target; // torque motor is trying to achieve (ideal torque)
+          measuredTorque = torques.Torque_Estimate; // Estimate of the actual torque
+        }
         
         // Convert raw load cell values to Newtons
         float lc1_newtons = loadCellToNewtons(lastLC1_raw, LC1_ZERO, LC1_NCOUNT);
@@ -380,7 +389,7 @@ void loop() {
         }
         lastPos = posFromStart;
         
-        // Log data in CSV format: Timestamp, Position, Velocity, Commanded Position, LC1 (N), LC2 (N), Direction
+        // Log data in CSV format: Timestamp, Position, Velocity, Commanded Position, LC1 (N), LC2 (N), Commanded Torque (Nm), Measured Torque (Nm), Direction
         Serial.print(now);
         Serial.print(",");
         Serial.print(posFromStart, 4);
@@ -392,6 +401,10 @@ void loop() {
         Serial.print(lc1_newtons, 6);
         Serial.print(",");
         Serial.print(lc2_newtons, 6);
+        Serial.print(",");
+        Serial.print(commandedTorque, 6);
+        Serial.print(",");
+        Serial.print(measuredTorque, 6);
         Serial.print(",");
         Serial.println(direction);
       }
