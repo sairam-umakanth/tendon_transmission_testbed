@@ -110,6 +110,12 @@ float startPosition = 0.0f;  // Starting position at one end of rail
 float centerPosition = 0.0f; // Center of oscillation (15mm from start)
 unsigned long startTime = 0;  // Time when motor started (for phase calculation)
 
+// Frequency sweep parameters
+const float FREQ_START = 0.5f;   // Starting frequency in Hz
+const float FREQ_END = 6.0f;    // Ending frequency in Hz
+const float SWEEP_DURATION = 60.0f;  // Duration of sweep in seconds (adjust as needed)
+const float RAMP_TIME = 0.5f;    // Time to ramp from 0 to -5mm
+
 // Data logging variables
 int32_t lastLC1_raw = 0;
 int32_t lastLC2_raw = 0;
@@ -211,7 +217,14 @@ void setup() {
     delay(10);
   }
 
-  Serial.println("ODrive ready. Press START button to begin position oscillation.");
+  Serial.println("ODrive ready. Press START button to begin frequency sweep.");
+  Serial.print("Sweep: ");
+  Serial.print(FREQ_START);
+  Serial.print(" Hz to ");
+  Serial.print(FREQ_END);
+  Serial.print(" Hz over ");
+  Serial.print(SWEEP_DURATION);
+  Serial.println(" seconds");
 }
 
 void loop() {
@@ -258,7 +271,7 @@ void loop() {
       
       // Print CSV header
       Serial.println("===== DATA START =====");
-      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,CommandedTorque_Nm,MeasuredTorque_Nm,Direction");
+      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,CommandedTorque_Nm,MeasuredTorque_Nm,Frequency_Hz,Direction");
       
       isLogging = true;
       runMotor = true;
@@ -270,7 +283,7 @@ void loop() {
       Serial.print(centerPosition, 4);
       Serial.println(" rot");
       
-      Serial.println("Starting position oscillation NOW!");
+      Serial.println("Starting frequency sweep NOW!");
     } else {
       Serial.println("ERROR: Could not read starting position!");
     }
@@ -316,26 +329,41 @@ void loop() {
       odrv0_user_data.received_feedback = true;
     }
     
-    // Calculate time and phase
-    float t = (now - startTime) * 0.001f;  // Time since START button pressed in seconds
-    float T = 3.0f;  // 3 second period
-    float phase = t * (TWO_PI / T);
+    // Calculate time since START button pressed in seconds
+    float t = (now - startTime) * 0.001f;
     
-    float rampTime = T / 6.0f;  // Ramp from 0 to -5mm over 0.5 seconds (1/6 of period)
-
     float commandedPosition;
+    float currentFrequency = FREQ_START;  // Default for ramp phase
 
-    if (t < rampTime) {
+    if (t < RAMP_TIME) {
       // Ramp phase: smoothly go from 0mm to -5mm (tensioning)
-      float rampProgress = t / rampTime;  // 0 to 1
+      float rampProgress = t / RAMP_TIME;  // 0 to 1
       float rampPositionMM = -5.0f * rampProgress;  // 0 to -5mm
       commandedPosition = startPosition + (rampPositionMM / MM_PER_ROTATION);
     } else {
-      // Oscillation phase: oscillate between -5mm and -30mm
-      float tOscillation = t - rampTime;  // Time since oscillation started
-      float phase = tOscillation * (TWO_PI / T);
+      // Frequency sweep phase
+      float tSweep = t - RAMP_TIME;  // Time since sweep started
       
-      const float MIN_POSITION_MM = -30.0f;
+      // Check if sweep is complete
+      if (tSweep > SWEEP_DURATION) {
+        // Hold at center position after sweep completes
+        runMotor = false;
+        isLogging = false;
+        Serial.println("===== SWEEP COMPLETE =====");
+        Serial.println("Holding at center position");
+        commandedPosition = startPosition + (-12.5f / MM_PER_ROTATION);  // Center of -5 to -20mm range
+      } else {
+      
+      // Linear frequency sweep from FREQ_START to FREQ_END
+      currentFrequency = FREQ_START + (FREQ_END - FREQ_START) * (tSweep / SWEEP_DURATION);
+      
+      // Calculate instantaneous phase by integrating frequency over time
+      // phase(t) = 2π * ∫f(t)dt = 2π * [f_start*t + (f_end-f_start)*t²/(2*T)]
+      float phase = TWO_PI * (FREQ_START * tSweep + 
+                              (FREQ_END - FREQ_START) * tSweep * tSweep / (2.0f * SWEEP_DURATION));
+      
+      // Oscillation parameters (same as before)
+      const float MIN_POSITION_MM = -20.0f;
       const float MAX_POSITION_MM = -5.0f;
       const float OSCILLATION_CENTER_MM = (MAX_POSITION_MM + MIN_POSITION_MM) / 2.0f;  
       const float OSCILLATION_RANGE_MM = MAX_POSITION_MM - MIN_POSITION_MM;  
@@ -343,10 +371,10 @@ void loop() {
       float amplitudeRot = (OSCILLATION_RANGE_MM / 2.0f) / MM_PER_ROTATION;
       float centerOffsetRot = OSCILLATION_CENTER_MM / MM_PER_ROTATION;
       
-      commandedPosition = startPosition + centerOffsetRot + amplitudeRot * cosf(phase);
+              commandedPosition = startPosition + centerOffsetRot + amplitudeRot * cosf(phase);
+      }
     }
     
-
     // Send position command
     odrv0.setPosition(commandedPosition);
     
@@ -363,8 +391,8 @@ void loop() {
         float commandedTorque = 0.0f;
         float measuredTorque = 0.0f;
         if (odrv0.request(torques, 100)) {
-          commandedTorque = torques.Torque_Target; // torque motor is trying to achieve (ideal torque)
-          measuredTorque = torques.Torque_Estimate; // Estimate of the actual torque
+          commandedTorque = torques.Torque_Target;
+          measuredTorque = torques.Torque_Estimate;
         }
         
         // Convert raw load cell values to Newtons
@@ -389,14 +417,14 @@ void loop() {
         }
         lastPos = posFromStart;
         
-        // Log data in CSV format: Timestamp, Position, Velocity, Commanded Position, LC1 (N), LC2 (N), Commanded Torque (Nm), Measured Torque (Nm), Direction
+        // Log data in CSV format with frequency
         Serial.print(now);
         Serial.print(",");
         Serial.print(posFromStart, 4);
         Serial.print(",");
         Serial.print(currentVel, 4);
         Serial.print(",");
-        Serial.print((commandedPosition - startPosition) * MM_PER_ROTATION, 4);  // Commanded position in mm
+        Serial.print((commandedPosition - startPosition) * MM_PER_ROTATION, 4);
         Serial.print(",");
         Serial.print(lc1_newtons, 6);
         Serial.print(",");
@@ -405,6 +433,8 @@ void loop() {
         Serial.print(commandedTorque, 6);
         Serial.print(",");
         Serial.print(measuredTorque, 6);
+        Serial.print(",");
+        Serial.print(currentFrequency, 4);  // Current frequency
         Serial.print(",");
         Serial.println(direction);
       }
