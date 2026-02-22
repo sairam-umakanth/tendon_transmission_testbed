@@ -13,7 +13,7 @@ void setupNAU(Adafruit_NAU7802 &nau) {
   nau.setRate(NAU7802_RATE_320SPS);
 
   nau.calibrate(NAU7802_CALMOD_INTERNAL);
-  nau.calibrate(NAU7802_CALMOD_OFFSET);
+  //nau.calibrate(NAU7802_CALMOD_OFFSET); // causes the LCs current force to be zero
 
   // Prime ADC
   for (int i = 0; i < 10; i++) {
@@ -89,6 +89,8 @@ void onCanMessage(const CanMsg& msg) {
 bool runMotor = false;
 bool isLogging = false;
 
+#define LED_GREEN 6
+
 bool lastStart = HIGH;
 bool lastStop = HIGH;
 unsigned long debounce = 150;
@@ -115,9 +117,11 @@ int32_t lastLC1_raw = 0;
 int32_t lastLC2_raw = 0;
 
 // Load cell calibration constants 
-const float LC1_ZERO = 145.17f;
+// const float LC1_ZERO = 170.80f;
+const float LC1_ZERO = 157500.0f;
 const float LC1_NCOUNT = 0.000095f; 
-const float LC2_ZERO = -3158.02;
+//const float LC2_ZERO = -3158.02;
+const float LC2_ZERO = -564694.0f;
 const float LC2_NCOUNT = 0.000096f; 
 
 // Function to convert raw load cell reading to Newtons
@@ -157,6 +161,8 @@ void setup() {
 
   pinMode(BUTTON_START, INPUT_PULLUP);
   pinMode(BUTTON_STOP, INPUT_PULLUP);
+  pinMode(LED_GREEN, OUTPUT);
+  digitalWrite(LED_GREEN, LOW);
 
   // Register callbacks for heartbeat and encoder feedback
   odrv0.onFeedback(onFeedback, &odrv0_user_data);
@@ -211,7 +217,57 @@ void setup() {
     delay(10);
   }
 
-  Serial.println("ODrive ready. Press START button to begin position oscillation.");
+  Serial.println("ODrive ready. Waiting for LC1 tension between -0.75 to -0.5 N for 5 continuous seconds...");
+
+  unsigned long inRangeStart = 0;
+  bool inRange = false;
+
+  while (true) {
+    if (nau1.available()) {
+      lastLC1_raw = nau1.read();
+    }
+
+    float lc1_newtons = loadCellToNewtons(lastLC1_raw, LC1_ZERO, LC1_NCOUNT);
+    unsigned long now = millis();
+
+    if ((lc1_newtons >= -25.3f) && (lc1_newtons <= -25.0f)) {
+      digitalWrite(LED_GREEN, HIGH); // turn on green light when in range
+      if (!inRange) {
+        // Just entered the range — start the timer
+        inRange = true;
+        inRangeStart = now;
+        Serial.println("In range! Holding for 5 seconds...");
+      } else if (now - inRangeStart >= 5000) {
+        // Been in range for 5 continuous seconds
+        Serial.print("LC1 stable at: ");
+        Serial.print(lc1_newtons, 4);
+        Serial.println(" N for 5s — Press START button to begin.");
+        break;
+      }
+    } else {
+      digitalWrite(LED_GREEN, LOW);
+      // Dropped out of range — reset
+      if (inRange) {
+        Serial.print("Out of range (");
+        Serial.print(lc1_newtons, 4);
+        Serial.println(" N) — restarting timer.");
+      }
+      inRange = false;
+      inRangeStart = 0;
+    }
+
+    static unsigned long lastPrint = 0;
+    if (now - lastPrint >= 200) {
+      Serial.print("LC1 force: ");
+      Serial.print(lc1_newtons, 4);
+      Serial.println(" N");
+      lastPrint = now;
+    }
+
+    delay(100);
+  }
+
+  digitalWrite(LED_GREEN, LOW); // turn off after condition is met
 }
 
 void loop() {
@@ -335,7 +391,7 @@ void loop() {
       float tOscillation = t - rampTime;  // Time since oscillation started
       float phase = tOscillation * (TWO_PI / T);
       
-      const float MIN_POSITION_MM = -20.0f;
+      const float MIN_POSITION_MM = -18.0f;
       const float MAX_POSITION_MM = -6.0f;
       const float OSCILLATION_CENTER_MM = (MAX_POSITION_MM + MIN_POSITION_MM) / 2.0f;  
       const float OSCILLATION_RANGE_MM = MAX_POSITION_MM - MIN_POSITION_MM;  
