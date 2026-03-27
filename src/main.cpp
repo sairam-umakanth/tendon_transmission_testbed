@@ -1,6 +1,8 @@
 #include "ODriveCAN.h"
 #include <Wire.h>
 #include <Adafruit_NAU7802.h>
+#include <QuadEncoder.h>
+
 
 /* ------------------------ Load Cells ------------------------ */
 // Create two NAU7802 objects
@@ -21,6 +23,11 @@ void setupNAU(Adafruit_NAU7802 &nau) {
     nau.read();
   }
 }
+
+/* ------------------------ Linear Encoder ------------------------ */
+// create linear encoder object
+QuadEncoder encoder1(3,5,7);  // ENC1 using pins 5 (A) and 7 (B)
+
 
 /* ------------------------- ODrive CAN ------------------------- */
 // CAN bus baudrate. Make sure this matches for every device on the bus
@@ -132,6 +139,9 @@ float loadCellToNewtons(int32_t rawValue, float zero, float nCount) {
 void setup() {
   while(!Serial);
   Serial.begin(115200);
+  Serial.println("Linear Encoder...");
+  encoder1.setInitConfig();   // load default settings
+  encoder1.init();            // initialize hardware encoder
 
   Serial.println("Initializing Load Cells...");
   // Start both I2C buses
@@ -230,7 +240,7 @@ void setup() {
     float lc1_newtons = loadCellToNewtons(lastLC1_raw, LC1_ZERO, LC1_NCOUNT);
     unsigned long now = millis();
 
-    if ((lc1_newtons >= -25.3f) && (lc1_newtons <= -25.0f)) {
+    if ((lc1_newtons >= -25.3f) && (lc1_newtons <= 25.0f)) {
       digitalWrite(LED_GREEN, HIGH); // turn on green light when in range
       if (!inRange) {
         // Just entered the range — start the timer
@@ -314,7 +324,7 @@ void loop() {
       
       // Print CSV header
       Serial.println("===== DATA START =====");
-      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,CommandedTorque_Nm,MeasuredTorque_Nm,Direction");
+      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,CommandedTorque_Nm,MeasuredTorque_Nm,Direction,Linear_Encoder_Pos_mm");
       
       isLogging = true;
       runMotor = true;
@@ -363,6 +373,8 @@ void loop() {
     
     float currentPos = 0.0f;
     float currentVel = 0.0f;
+    long linear_encoder_count = 0.0f;
+    
     
     if (haveFeedback) {
       currentPos = feedback.Pos_Estimate;
@@ -370,6 +382,8 @@ void loop() {
       // Update our stored feedback
       odrv0_user_data.last_feedback = feedback;
       odrv0_user_data.received_feedback = true;
+      // Read linear encoder position
+      linear_encoder_count = encoder1.read();
     }
     
     // Calculate time and phase
@@ -463,6 +477,8 @@ void loop() {
         Serial.print(measuredTorque, 6);
         Serial.print(",");
         Serial.println(direction);
+        Serial.print(",");
+        Serial.println(linear_encoder_count/1e3, 3);
       }
     }
   }
