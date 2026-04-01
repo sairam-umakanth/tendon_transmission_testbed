@@ -27,7 +27,7 @@ void setupNAU(Adafruit_NAU7802 &nau) {
 /* ------------------------ Linear Encoder ------------------------ */
 // create linear encoder object
 QuadEncoder encoder1(3,5,7);  // ENC1 using pins 5 (A) and 7 (B)
-
+long encoderStartCount = 0;
 
 /* ------------------------- ODrive CAN ------------------------- */
 // CAN bus baudrate. Make sure this matches for every device on the bus
@@ -227,7 +227,7 @@ void setup() {
     delay(10);
   }
 
-  Serial.println("ODrive ready. Waiting for LC1 tension between -0.75 to -0.5 N for 5 continuous seconds...");
+  Serial.println("ODrive ready. Waiting for LC1 tension between -25.3 to -25 N for 5 continuous seconds...");
 
   unsigned long inRangeStart = 0;
   bool inRange = false;
@@ -240,7 +240,7 @@ void setup() {
     float lc1_newtons = loadCellToNewtons(lastLC1_raw, LC1_ZERO, LC1_NCOUNT);
     unsigned long now = millis();
 
-    if ((lc1_newtons >= -25.3f) && (lc1_newtons <= 25.0f)) {
+    if ((lc1_newtons >= -25.3f) && (lc1_newtons <= -25.0f)) {
       digitalWrite(LED_GREEN, HIGH); // turn on green light when in range
       if (!inRange) {
         // Just entered the range — start the timer
@@ -318,6 +318,7 @@ void loop() {
     if (odrv0.request(feedback, 500)) {
       // Set reference so CURRENT position is the starting point
       startPosition = feedback.Pos_Estimate;
+      encoderStartCount = encoder1.read();
       centerPosition = startPosition + (MAX_POSITION_ROTATIONS / 2.0f);
       odrv0_user_data.last_feedback = feedback;
       odrv0_user_data.received_feedback = true;
@@ -383,7 +384,7 @@ void loop() {
       odrv0_user_data.last_feedback = feedback;
       odrv0_user_data.received_feedback = true;
       // Read linear encoder position
-      linear_encoder_count = encoder1.read();
+      linear_encoder_count = encoder1.read() - encoderStartCount;
     }
     
     // Calculate time and phase
@@ -476,7 +477,7 @@ void loop() {
         Serial.print(",");
         Serial.print(measuredTorque, 6);
         Serial.print(",");
-        Serial.println(direction);
+        Serial.print(direction);
         Serial.print(",");
         Serial.println(linear_encoder_count/1e3, 3);
       }
