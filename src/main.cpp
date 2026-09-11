@@ -245,8 +245,8 @@ void setup() {
     float lc1_newtons = loadCellToNewtons(lastLC1_raw, LC1_ZERO, LC1_NCOUNT);
     unsigned long now = millis();
 
-    // if ((lc1_newtons >= -25.5f) && (lc1_newtons <= -25.0f)) {
-    if (true) {  // For testing, ignore the load cell range
+    if ((lc1_newtons >= -25.5f) && (lc1_newtons <= -25.0f)) {
+    // if (true) {  // For testing, ignore the load cell range
       digitalWrite(TENSION_LED, HIGH); // turn on green light when in range
       if (!inRange) {
         // Just entered the range — start the timer
