@@ -96,10 +96,13 @@ void onCanMessage(const CanMsg& msg) {
 bool runMotor = false;
 bool isLogging = false;
 
-#define LED_GREEN 6
+#define TENSION_LED 6
+#define PROCESS_LED 9
 
 bool lastStart = HIGH;
 bool lastStop = HIGH;
+bool LEDSequence = false;
+int LEDSequenceCount = 0;
 unsigned long debounce = 150;
 unsigned long lastStartTime = 0, lastStopTime = 0;
 
@@ -171,8 +174,10 @@ void setup() {
 
   pinMode(BUTTON_START, INPUT_PULLUP);
   pinMode(BUTTON_STOP, INPUT_PULLUP);
-  pinMode(LED_GREEN, OUTPUT);
-  digitalWrite(LED_GREEN, LOW);
+  pinMode(TENSION_LED, OUTPUT);
+  pinMode(PROCESS_LED, OUTPUT);
+  digitalWrite(TENSION_LED, LOW);
+  digitalWrite(PROCESS_LED, LOW);
 
   // Register callbacks for heartbeat and encoder feedback
   odrv0.onFeedback(onFeedback, &odrv0_user_data);
@@ -240,8 +245,9 @@ void setup() {
     float lc1_newtons = loadCellToNewtons(lastLC1_raw, LC1_ZERO, LC1_NCOUNT);
     unsigned long now = millis();
 
-    if ((lc1_newtons >= -25.3f) && (lc1_newtons <= -25.0f)) {
-      digitalWrite(LED_GREEN, HIGH); // turn on green light when in range
+    // if ((lc1_newtons >= -25.5f) && (lc1_newtons <= -25.0f)) {
+    if (true) {  // For testing, ignore the load cell range
+      digitalWrite(TENSION_LED, HIGH); // turn on green light when in range
       if (!inRange) {
         // Just entered the range — start the timer
         inRange = true;
@@ -255,7 +261,7 @@ void setup() {
         break;
       }
     } else {
-      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(TENSION_LED, LOW);
       // Dropped out of range — reset
       if (inRange) {
         Serial.print("Out of range (");
@@ -277,7 +283,7 @@ void setup() {
     delay(100);
   }
 
-  digitalWrite(LED_GREEN, LOW); // turn off after condition is met
+  digitalWrite(TENSION_LED, LOW); // turn off after condition is met
 }
 
 void loop() {
@@ -325,7 +331,7 @@ void loop() {
       
       // Print CSV header
       Serial.println("===== DATA START =====");
-      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,CommandedTorque_Nm,MeasuredTorque_Nm,Direction,Linear_Encoder_Pos_mm");
+      Serial.println("Timestamp_ms,Position_mm,Velocity_rot_s,Commanded_Position_rot,LoadCell1_N,LoadCell2_N,CommandedTorque_Nm,MeasuredTorque_Nm,Direction,Linear_Encoder_Pos_mm, LED_State");
       
       isLogging = true;
       runMotor = true;
@@ -341,7 +347,7 @@ void loop() {
     } else {
       Serial.println("ERROR: Could not read starting position!");
     }
-    
+
     lastStartTime = now;
   }
   
@@ -349,6 +355,7 @@ void loop() {
   if (stopState == LOW && lastStop == HIGH && (now - lastStopTime) > debounce) {
     runMotor = false;
     isLogging = false;
+    LEDSequenceCount = 0;
     Serial.println("===== DATA END =====");
     Serial.println("Stopping - holding current position");
     
@@ -369,6 +376,24 @@ void loop() {
   // ------------- MOTOR COMMAND & DATA LOGGING -------------
   if (runMotor) {
     // Manually request feedback every loop iteration
+        // LED Sequence for computer vision registering
+    if (LEDSequenceCount >= 3) {
+      LEDSequence = false;
+      digitalWrite(PROCESS_LED, LOW);
+    } else {
+      long timeElapsedLED = now - startTime;
+        if (timeElapsedLED < (LEDSequenceCount * 1000 + 500)) {
+          digitalWrite(PROCESS_LED, HIGH);
+          LEDSequence = true;
+        } else if (timeElapsedLED < (LEDSequenceCount * 1000 + 1000)) {
+          digitalWrite(PROCESS_LED, LOW);
+          LEDSequence = false;
+        } else {
+          LEDSequenceCount++;
+          Serial.println("Flag");
+        }
+    }
+
     Get_Encoder_Estimates_msg_t feedback;
     bool haveFeedback = odrv0.request(feedback, 100); // 100ms timeout
     
@@ -479,7 +504,9 @@ void loop() {
         Serial.print(",");
         Serial.print(direction);
         Serial.print(",");
-        Serial.println(linear_encoder_count/1e3, 3);
+        Serial.print(linear_encoder_count/1e3, 3);
+        Serial.print(",");
+        Serial.println(LEDSequence? "ON" : "OFF");
       }
     }
   }
